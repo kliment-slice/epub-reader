@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Pause, Play, Square, BookOpen } from "lucide-react";
 
 type Voice = {
   name: string;
@@ -16,7 +17,7 @@ type TocItem = {
 };
 
 const sampleText =
-  "Upload an EPUB, pick a voice, adjust cadence, and start streaming audio. The Kokoro model loads locally in your browser—first load will download the weights.";
+  "Upload an EPUB to get started.";
 
 type EpubContent = { document?: Document | null };
 
@@ -109,6 +110,8 @@ export default function Home() {
     }
     return boundaries;
   };
+
+  const normalizeForPlayback = (text: string) => text.replace(/\s+/g, " ").trim();
 
   const playQueue = useCallback(async () => {
     if (playingRef.current) return;
@@ -307,7 +310,7 @@ export default function Home() {
     // Avoid starting mid-word by jumping to the next whitespace boundary if possible
     const nextBoundary = currentText.indexOf(" ", startIndex + 1);
     const start = nextBoundary > -1 ? nextBoundary + 1 : startIndex;
-    return currentText.slice(start).trim();
+    return currentText.slice(start);
   };
 
   const startStreamingFrom = (percent = 0) => {
@@ -410,11 +413,11 @@ export default function Home() {
     const text = contents
       .map((content) => content.document?.body?.innerText || "")
       .filter(Boolean)
-      .join("\n")
-      .trim();
-    if (text) {
+      .join("\n");
+    const normalized = normalizeForPlayback(text);
+    if (normalized) {
       console.log("Captured text from rendition");
-      setCurrentText(text);
+      setCurrentText(normalized);
       setReadChars(0);
       readCharsRef.current = 0;
     } else {
@@ -447,9 +450,10 @@ export default function Home() {
         bodyText = doc.body.textContent || "";
       }
 
-      if (bodyText) {
+      const normalized = normalizeForPlayback(bodyText);
+      if (normalized) {
         console.log("Text fallback successful");
-        setCurrentText(bodyText.trim());
+        setCurrentText(normalized);
       } else {
         console.warn("Text fallback found content but empty body text");
       }
@@ -500,8 +504,23 @@ export default function Home() {
 
   const timelinePercent = userScrub ?? getEffectiveProgress();
   const readPointer = Math.min(readChars, currentText.length);
-  const readPart = currentText.slice(0, readPointer);
-  const unreadPart = currentText.slice(readPointer);
+  const findWordStart = () => {
+    for (let i = readPointer - 1; i >= 0; i -= 1) {
+      if (/\s/.test(currentText[i])) return i + 1;
+    }
+    return 0;
+  };
+  const findWordEnd = () => {
+    for (let i = readPointer; i < currentText.length; i += 1) {
+      if (/\s/.test(currentText[i])) return i;
+    }
+    return currentText.length;
+  };
+  const wordStart = findWordStart();
+  const wordEnd = Math.max(wordStart, findWordEnd());
+  const beforeWord = currentText.slice(0, wordStart);
+  const activeWord = currentText.slice(wordStart, wordEnd) || " ";
+  const afterWord = currentText.slice(wordEnd);
 
   useEffect(() => {
     const overlay = overlayRef.current;
@@ -512,27 +531,29 @@ export default function Home() {
   }, [readChars, currentText.length]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-900 via-slate-950 to-black text-slate-50">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6 px-4 py-10">
-        <header className="flex flex-col gap-2 rounded-3xl border border-white/10 bg-white/5 p-6 shadow-2xl shadow-cyan-500/10 backdrop-blur">
+    <div className="relative min-h-screen overflow-hidden bg-[var(--bg)] text-[var(--text)]">
+      <div className="pointer-events-none absolute inset-0 -z-10 opacity-90">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_20%_15%,rgba(240,117,34,0.14),transparent_35%),radial-gradient(circle_at_85%_10%,rgba(240,117,34,0.1),transparent_40%),radial-gradient(circle_at_70%_80%,rgba(240,117,34,0.12),transparent_40%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_0%_0%,rgba(0,0,0,0.08),transparent_22%),radial-gradient(circle_at_100%_100%,rgba(0,0,0,0.08),transparent_20%)] mix-blend-multiply" />
+        <div className="absolute inset-0 bg-[var(--bg)]/65 backdrop-blur-[1px]" />
+      </div>
+
+      <div className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-10 pb-32">
+        <header className="surface px-6 py-5 shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-sm uppercase tracking-[0.3em] text-cyan-300/80">Kokoro EPUB</p>
-              <h1 className="text-3xl font-semibold text-white">Local EPUB reader with streaming TTS</h1>
-            </div>
-            <div className="rounded-full border border-white/10 bg-white/10 px-4 py-2 text-sm text-cyan-100">
-              {device ? `Device: ${device}` : "Detecting device..."}
+            <div className="space-y-1">
+              <h1 className="text-3xl font-semibold tracking-tight">Free EPUB reader</h1>
             </div>
           </div>
-          <p className="text-sm text-slate-200/80">
-            Drop an EPUB, browse chapters, choose a Kokoro voice, and stream audio with adjustable cadence.
+          <p className="mt-3 text-sm text-[var(--muted)]">
+            Drop an EPUB, browse chapters, choose a voice, and stream audio with adjustable cadence.
           </p>
         </header>
 
-        <main className="grid grid-cols-1 gap-6 lg:grid-cols-[2fr_1fr]">
-          <section className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
-            <div className="flex flex-wrap items-center gap-4">
-              <label className="flex cursor-pointer items-center gap-3 rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm font-medium text-slate-100 transition hover:border-cyan-300/50 hover:text-white">
+        <main className="grid grid-cols-1 gap-6 lg:grid-cols-[1.6fr_1fr]">
+          <section className="surface p-5">
+            <div className="flex flex-wrap items-center gap-4 border-b border-[var(--stroke)] pb-4">
+              <label className="flex cursor-pointer items-center gap-2 rounded-lg border border-stone-600 bg-stone-700 px-2 py-1 text-sm font-semibold text-[var(--text)] hover:text-[var(--accent)]">
                 <input
                   className="hidden"
                   type="file"
@@ -540,70 +561,76 @@ export default function Home() {
                   onChange={(e) => {
                     const file = e.target.files?.[0];
                     if (file) handleFile(file);
-                    // allow selecting the same file twice in a row
                     e.target.value = "";
                   }}
                 />
-                <span className="h-2 w-2 rounded-full bg-cyan-400" />
-                Select EPUB
+                <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
+                <BookOpen className="h-4 w-4" /> Select EPUB
               </label>
-              <div className="flex items-center gap-2 text-xs text-slate-200/80">
-                <span className="h-2 w-2 rounded-full bg-emerald-400" />
+              <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
+                <span className="h-2 w-2 rounded-full bg-[var(--accent)]/60" />
                 {loadingProgress > 0
-                  ? `Kokoro model ${loadingProgress}%`
+                  ? `Model ${loadingProgress}%`
                   : "Model loads on first play (downloads once)"}
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-[240px_1fr]">
-              <div className="rounded-2xl border border-white/10 bg-black/40 p-3">
-                <h3 className="mb-2 text-sm font-semibold text-slate-100">Chapters</h3>
-                <div className="space-y-1 overflow-y-auto text-sm text-slate-200/90">
+            <div className="grid grid-cols-1 gap-4 pt-4 lg:grid-cols-[240px_1fr]">
+              <div className="card p-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-semibold">Chapters</h3>
+                  <span className="text-xs text-[var(--muted)]">{chapters.length || 0}</span>
+                </div>
+                <div className="divider my-2" />
+                <div className="space-y-1 overflow-y-auto text-sm" style={{ maxHeight: "62vh" }}>
                   {chapters.length === 0 && (
-                    <p className="text-xs text-slate-400">Load an EPUB to see its navigation.</p>
+                    <p className="text-xs text-[var(--muted)]">Load an EPUB to see its navigation.</p>
                   )}
-                  {chapters.map((chapter) => (
-                    <button
-                      key={`${chapter.href}-${chapter.label}`}
-                      onClick={() => handleChapterSelect(chapter.href)}
-                      className={`w-full rounded-lg px-2 py-2 text-left transition hover:bg-white/10 ${activeHref === chapter.href ? "bg-cyan-500/20 text-white" : "text-slate-200/90"
-                        }`}
-                      style={{ paddingLeft: `${12 + chapter.depth * 10}px` }}
-                    >
-                      {chapter.label}
-                  </button>
-                ))}
+                  {chapters.map((chapter) => {
+                    const active = activeHref === chapter.href;
+                    const base = active ? "text-[var(--accent-strong)]" : "text-[var(--text)]";
+                    return (
+                      <button
+                        key={`${chapter.href}-${chapter.label}`}
+                        onClick={() => handleChapterSelect(chapter.href)}
+                        className={`flex w-full items-center gap-2 px-2 py-1 text-left transition-colors ${base} hover:text-[var(--accent)]`}
+                        style={{ paddingLeft: `${8 + chapter.depth * 12}px` }}
+                      >
+                        <span className="inline-block h-[2px] w-6 rounded bg-[var(--stroke)]" />
+                        <span className="line-clamp-1">{chapter.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            </div>
 
-              <div className="relative min-h-[520px] rounded-2xl border border-white/10 bg-white text-slate-900 shadow-2xl shadow-cyan-500/10 p-3 lg:min-h-[640px]">
-                <div
-                  ref={viewerRef}
-                  className="relative h-[500px] w-full overflow-hidden rounded-xl border border-slate-200 bg-white opacity-0 lg:h-[620px]"
-                />
-                <div className="pointer-events-none absolute inset-3 rounded-xl border border-transparent bg-white shadow-inner shadow-slate-200/40">
-                  <div
-                    ref={overlayRef}
-                    className="h-full overflow-y-auto rounded-xl p-4 text-sm leading-relaxed text-slate-800"
-                  >
-                    <span className="rounded bg-amber-200/70 px-0.5 text-slate-900 transition-colors duration-200">
-                      {readPart}
+              <div className="relative min-h-[520px] card p-4 lg:min-h-[640px]">
+                <div ref={viewerRef} className="relative h-[500px] w-full overflow-hidden rounded-xl border border-[var(--stroke)] bg-[var(--card)] opacity-0 lg:h-[620px]" />
+                <div className="pointer-events-none absolute inset-4 rounded-xl border border-[var(--stroke)] bg-[var(--card)] shadow-inner">
+                  <div ref={overlayRef} className="h-full overflow-y-auto rounded-xl p-4 text-sm leading-relaxed">
+                    <span className="text-[var(--muted)]">{beforeWord}</span>
+                    <span className="rounded bg-[var(--accent)]/35 px-1 text-[var(--text)] transition-colors duration-150">
+                      {activeWord}
                     </span>
-                    <span className="text-slate-600/80">{unreadPart}</span>
+                    <span className="text-[var(--muted)]/80">{afterWord}</span>
                   </div>
-                  <div className="pointer-events-none absolute inset-0 rounded-xl bg-gradient-to-b from-white/0 via-white/0 to-white/60" />
+                  <div className="pointer-events-none absolute inset-0 rounded-xl bg-gradient-to-b from-transparent via-transparent to-[var(--overlay)]" />
                 </div>
               </div>
             </div>
           </section>
 
-          <aside className="flex flex-col gap-4 rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur">
-            <h2 className="text-lg font-semibold text-white">Text to speech</h2>
+          <aside className="surface p-5">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold">Text to speech</h2>
+              <span className="text-xs text-[var(--muted)]">Kokoro</span>
+            </div>
+            <div className="divider my-4" />
             <div className="space-y-4">
               <div className="space-y-2">
-                <label className="text-xs uppercase tracking-[0.2em] text-slate-300">Voice</label>
+                <label className="label">Voice</label>
                 <select
-                  className="w-full rounded-lg border border-white/10 bg-black/40 px-3 py-2 text-sm text-slate-100 outline-none transition hover:border-cyan-400 focus:border-cyan-400"
+                  className="w-full bg-transparent px-3 py-2 text-sm"
                   value={selectedVoice}
                   onChange={(e) => setSelectedVoice(e.target.value)}
                   disabled={!ttsReady || Object.keys(voices).length === 0}
@@ -617,9 +644,9 @@ export default function Home() {
               </div>
 
               <div className="space-y-2">
-                <label className="flex items-center justify-between text-xs uppercase tracking-[0.2em] text-slate-300">
+                <label className="flex items-center justify-between label">
                   Cadence
-                  <span className="rounded-full bg-white/10 px-2 py-1 text-[10px] text-cyan-100">{cadence.toFixed(2)}x</span>
+                  <span className="text-[11px] font-semibold text-[var(--accent)]">{cadence.toFixed(2)}x</span>
                 </label>
                 <input
                   type="range"
@@ -628,50 +655,50 @@ export default function Home() {
                   step={0.05}
                   value={cadence}
                   onChange={(e) => setCadence(Number(e.target.value))}
-                  className="w-full accent-cyan-400"
+                  className="range w-full"
+                  style={{ accentColor: "var(--accent)" }}
                 />
               </div>
 
               <div className="space-y-2">
-                <label className="text-xs uppercase tracking-[0.2em] text-slate-300">Current text</label>
+                <label className="label">Current text</label>
                 <textarea
-                  className="h-32 w-full rounded-xl border border-white/10 bg-black/40 p-3 text-sm text-slate-100 outline-none transition hover:border-cyan-400 focus:border-cyan-400"
+                  className="h-32 w-full bg-transparent p-3 text-sm"
                   value={currentText}
-                  onChange={(e) => setCurrentText(e.target.value)}
+                  onChange={(e) => setCurrentText(normalizeForPlayback(e.target.value))}
                 />
               </div>
 
               <div className="flex items-center gap-3">
                 <button
                   onClick={startStreaming}
-                  className="flex-1 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 px-4 py-3 text-sm font-semibold text-slate-950 shadow-lg shadow-cyan-500/30 transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex flex-1 items-center gap-2 text-left text-base font-semibold text-[var(--text)] hover:text-[var(--accent)]"
                   disabled={!ttsReady && !loadingProgress}
                 >
+                  {isStreaming ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                   {isStreaming ? "Pause" : "Play"}
                 </button>
-                <div className="rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs text-slate-200">
-                  {statusMessage}
-                </div>
+                <div className="card px-3 py-2 text-xs text-[var(--muted)]">{statusMessage}</div>
               </div>
 
-              <div className="space-y-2">
-                <div className="flex justify-between text-xs text-slate-300">
+              <div className="space-y-3">
+                <div className="flex justify-between text-xs text-[var(--muted)]">
                   <span>Model</span>
                   <span>{loadingProgress}%</span>
                 </div>
-                <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                <div className="h-1.5 overflow-hidden rounded-full bg-[var(--stroke)]">
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-cyan-400 to-emerald-400 transition-all"
+                    className="h-full rounded-full bg-[var(--accent)] transition-all"
                     style={{ width: `${loadingProgress}%` }}
                   />
                 </div>
-                <div className="flex justify-between text-xs text-slate-300">
+                <div className="flex justify-between text-xs text-[var(--muted)]">
                   <span>Streaming</span>
                   <span>{streamingProgress}%</span>
                 </div>
-                <div className="h-2 overflow-hidden rounded-full bg-white/10">
+                <div className="h-1.5 overflow-hidden rounded-full bg-[var(--stroke)]">
                   <div
-                    className="h-full rounded-full bg-gradient-to-r from-amber-400 to-pink-500 transition-all"
+                    className="h-full rounded-full bg-[var(--accent-strong)] transition-all"
                     style={{ width: `${streamingProgress}%` }}
                   />
                 </div>
@@ -680,23 +707,37 @@ export default function Home() {
           </aside>
         </main>
       </div>
-      <footer className="fixed bottom-0 left-0 right-0 border-t border-white/10 bg-slate-950/80 backdrop-blur">
-        <div className="mx-auto flex max-w-5xl flex-col gap-2 px-4 py-3">
+      <footer className="fixed bottom-0 left-0 right-0 z-20 border-t border-[var(--stroke)] bg-[var(--surface)]/95 backdrop-blur shadow-[0_-12px_38px_rgba(0,0,0,0.22)]">
+        <div className="mx-auto max-w-6xl space-y-2 px-4 py-3">
           <div className="flex items-center gap-3">
             <button
               onClick={startStreaming}
-              className="rounded-full border border-white/15 bg-white/10 px-4 py-2 text-sm font-semibold text-white transition hover:border-cyan-300/60 hover:text-cyan-100"
+              className="flex items-center gap-2 text-sm font-semibold"
               disabled={!ttsReady && !loadingProgress}
             >
+              {isStreaming ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
               {isStreaming ? "Pause" : "Play"}
             </button>
+            <div className="flex-1 text-center">
+              <p className="text-[11px] uppercase tracking-[0.2em] text-[var(--muted)]">Now streaming</p>
+              <p className="text-xs font-semibold text-[var(--text)] line-clamp-1">{statusMessage}</p>
+            </div>
             <button
               onClick={() => stopAudio()}
-              className="rounded-full border border-white/15 bg-white/5 px-3 py-2 text-xs text-slate-200 transition hover:border-rose-300/60 hover:text-rose-100"
+              className="flex items-center gap-1 text-xs text-[var(--muted)] hover:text-[var(--accent)]"
             >
+              <Square className="h-3.5 w-3.5" />
               Stop
             </button>
-            <div className="flex-1">
+          </div>
+          <div className="flex items-center gap-3 text-[11px] text-[var(--muted)]">
+            <span className="min-w-[36px] text-left">0%</span>
+            <div className="relative w-full py-2">
+              <div className="absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-[var(--stroke)]" />
+              <div
+                className="absolute left-0 top-1/2 h-1 -translate-y-1/2 rounded-full bg-[var(--accent)] transition-all"
+                style={{ width: `${timelinePercent}%` }}
+              />
               <input
                 type="range"
                 min={0}
@@ -706,13 +747,11 @@ export default function Home() {
                 onChange={(e) => handleTimelineScrub(Number(e.target.value))}
                 onMouseUp={(e) => commitTimelineScrub(Number(e.currentTarget.value))}
                 onTouchEnd={(e) => commitTimelineScrub(Number((e.target as HTMLInputElement).value))}
-                className="w-full accent-cyan-400"
+                className="absolute inset-0 w-full cursor-pointer opacity-0"
+                style={{ accentColor: "var(--accent)" }}
               />
-              <div className="flex justify-between text-[11px] text-slate-300">
-                <span>{Math.round(timelinePercent)}%</span>
-                <span>{statusMessage}</span>
-              </div>
             </div>
+            <span className="min-w-[48px] text-right">{Math.round(timelinePercent)}%</span>
           </div>
         </div>
       </footer>
