@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pause, Play, Square, BookOpen } from "lucide-react";
+import { Pause, Play, Square, BookOpen, Wifi, WifiOff } from "lucide-react";
+
+// TTS API configuration
+const TTS_API_URL = process.env.NEXT_PUBLIC_TTS_API_URL || "http://localhost:8080";
 
 type Voice = {
   name: string;
@@ -62,12 +65,12 @@ export default function Home() {
   const overlayRef = useRef<HTMLDivElement | null>(null);
   const renditionRef = useRef<EpubRendition | null>(null);
   const bookRef = useRef<EpubBook | null>(null);
-  const workerRef = useRef<Worker | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const queueRef = useRef<{ buffer: AudioBuffer; text?: string }[]>([]);
   const playingRef = useRef(false);
   const isStreamingRef = useRef(false);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const totalChunksRef = useRef(0);
   const processedChunksRef = useRef(0);
   const chunkAnimationRef = useRef<number | null>(null);
@@ -79,15 +82,60 @@ export default function Home() {
   const [voices, setVoices] = useState<Record<string, Voice>>({});
   const [selectedVoice, setSelectedVoice] = useState<string>("af_heart");
   const [cadence, setCadence] = useState(1);
-  const [loadingProgress, setLoadingProgress] = useState<number>(0);
+  const [serverStatus, setServerStatus] = useState<"connecting" | "ready" | "error">("connecting");
   const [streamingProgress, setStreamingProgress] = useState<number>(0);
-  const [statusMessage, setStatusMessage] = useState<string>("Model not loaded yet");
+  const [statusMessage, setStatusMessage] = useState<string>("Connecting to TTS server...");
   const [isStreaming, setIsStreaming] = useState(false);
-  const [device, setDevice] = useState<string | null>(null);
-  const [streamBaseOffset, setStreamBaseOffset] = useState<number>(0); // where the current stream starts (0-100)
+  const [streamBaseOffset, setStreamBaseOffset] = useState<number>(0);
   const [userScrub, setUserScrub] = useState<number | null>(null);
   const [readChars, setReadChars] = useState(0);
   const readCharsRef = useRef(0);
+
+  // Warmup the TTS server on page load
+  useEffect(() => {
+    const warmupServer = async () => {
+      try {
+        setStatusMessage("Connecting to TTS server...");
+        setServerStatus("connecting");
+
+        const response = await fetch(`${TTS_API_URL}/health`, {
+          method: "GET",
+          headers: { "Accept": "application/json" },
+        });
+
+        if (!response.ok) {
+          throw new Error(`Server returned ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        if (data.model_loaded) {
+          setTtsReady(true);
+          setServerStatus("ready");
+          setStatusMessage("TTS server ready");
+          if (data.voices) {
+            setVoices(data.voices);
+            if (data.voices["af_heart"]) {
+              setSelectedVoice("af_heart");
+            } else {
+              setSelectedVoice(Object.keys(data.voices)[0]);
+            }
+          }
+        } else {
+          // Model is still loading, poll again
+          setTimeout(warmupServer, 2000);
+        }
+      } catch (error) {
+        console.error("Failed to connect to TTS server:", error);
+        setServerStatus("error");
+        setStatusMessage("TTS server unavailable");
+        // Retry connection
+        setTimeout(warmupServer, 5000);
+      }
+    };
+
+    warmupServer();
+  }, []);
 
   const ensureAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
@@ -168,97 +216,35 @@ export default function Home() {
         );
         setStreamingProgress(pct);
       }
-      workerRef.current?.postMessage({ type: "buffer_processed" });
     }
 
     playingRef.current = false;
-  }, [ensureAudioContext]);
+  }, [ensureAudioContext, currentText]);
 
-  const enqueueAudio = useCallback(
-    (audioBuffer: ArrayBuffer, textChunk?: string) => {
+  const enqueueAudioFromWav = useCallback(
+    async (wavData: ArrayBuffer, textChunk?: string) => {
       if (!isStreamingRef.current) return;
       const ctx = ensureAudioContext();
-      const floatData = new Float32Array(audioBuffer);
-      const buffer = ctx.createBuffer(1, floatData.length, 24000);
-      buffer.copyToChannel(floatData, 0, 0);
-      queueRef.current.push({ buffer, text: textChunk });
-      void playQueue();
+
+      try {
+        // Decode WAV audio data
+        const audioBuffer = await ctx.decodeAudioData(wavData.slice(0));
+        queueRef.current.push({ buffer: audioBuffer, text: textChunk });
+        void playQueue();
+      } catch (error) {
+        console.error("Failed to decode audio:", error);
+      }
     },
     [ensureAudioContext, playQueue],
   );
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const worker = new Worker("/kokoro/worker.js", { type: "module" });
-    workerRef.current = worker;
-
-    const handleMessage = (e: MessageEvent) => {
-      switch (e.data.status) {
-        case "loading_model_start":
-          setDevice(e.data.device);
-          setStatusMessage("Loading Kokoro weights...");
-          setLoadingProgress(0);
-          break;
-        case "loading_model_progress":
-          setLoadingProgress(Math.round(Number(e.data.progress) * 100));
-          setStatusMessage("Downloading model...");
-          break;
-        case "loading_model_ready":
-          setTtsReady(true);
-          setVoices(e.data.voices || {});
-          setStatusMessage("Model ready");
-          setLoadingProgress(100);
-          if (e.data.voices && e.data.voices["af_heart"]) {
-            setSelectedVoice("af_heart");
-          } else if (e.data.voices) {
-            setSelectedVoice(Object.keys(e.data.voices)[0]);
-          }
-          break;
-        case "chunk_count":
-          totalChunksRef.current = e.data.count;
-          processedChunksRef.current = 0;
-          setStreamingProgress(0);
-          break;
-        case "stream_audio_data":
-          enqueueAudio(e.data.audio, e.data.text);
-          break;
-        case "complete":
-          setIsStreaming(false);
-          isStreamingRef.current = false;
-          setStatusMessage("Streaming complete");
-          setStreamingProgress(100);
-          queueRef.current = [];
-          break;
-        case "error":
-          console.error("Worker sent error:", e.data.error);
-          setStatusMessage(`Error: ${e.data.error}`);
-          setIsStreaming(false);
-          isStreamingRef.current = false;
-          break;
-        default:
-          break;
-      }
-    };
-
-    const handleError = (err: ErrorEvent) => {
-      console.error("Worker error", err);
-      setStatusMessage("Something went wrong while streaming.");
-      setIsStreaming(false);
-      isStreamingRef.current = false;
-    };
-
-    worker.addEventListener("message", handleMessage);
-    worker.addEventListener("error", handleError);
-
-    return () => {
-      worker.removeEventListener("message", handleMessage);
-      worker.removeEventListener("error", handleError);
-      worker.terminate();
-      audioContextRef.current?.close();
-    };
-  }, [enqueueAudio]);
-
   const stopAudio = (resetOffset = true) => {
+    // Abort any in-flight fetch
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+    }
+
     queueRef.current = [];
     processedChunksRef.current = 0;
     totalChunksRef.current = 0;
@@ -276,7 +262,6 @@ export default function Home() {
       setReadChars(0);
       readCharsRef.current = 0;
     }
-    workerRef.current?.postMessage({ type: "stop" });
   };
 
   const getEffectiveProgress = () => {
@@ -293,7 +278,6 @@ export default function Home() {
       const el = content.document?.documentElement || content.document?.body;
       if (!el) return;
       const target = (el.scrollHeight - el.clientHeight) * pct;
-      // Use instant scroll to avoid aggressive smooth scrolling jumps
       el.scrollTo({ top: target, behavior: "auto" });
     });
     if (overlayRef.current) {
@@ -307,22 +291,67 @@ export default function Home() {
     if (!currentText) return "";
     const pct = Math.min(100, Math.max(0, percent));
     const startIndex = Math.floor((pct / 100) * currentText.length);
-    // Avoid starting mid-word by jumping to the next whitespace boundary if possible
     const nextBoundary = currentText.indexOf(" ", startIndex + 1);
     const start = nextBoundary > -1 ? nextBoundary + 1 : startIndex;
     return currentText.slice(start);
   };
 
-  const startStreamingFrom = (percent = 0) => {
-    if (!workerRef.current) {
-      setStatusMessage("No TTS worker available.");
+  // Split text into chunks suitable for TTS (max 8000 chars each to stay under API limit)
+  const splitTextIntoChunks = (text: string, maxLength = 8000): string[] => {
+    if (text.length <= maxLength) return [text];
+
+    const chunks: string[] = [];
+    let remaining = text;
+
+    while (remaining.length > 0) {
+      if (remaining.length <= maxLength) {
+        chunks.push(remaining);
+        break;
+      }
+
+      // Find a good break point (sentence or paragraph)
+      let breakPoint = remaining.lastIndexOf('. ', maxLength);
+      if (breakPoint < maxLength * 0.5) {
+        breakPoint = remaining.lastIndexOf('? ', maxLength);
+      }
+      if (breakPoint < maxLength * 0.5) {
+        breakPoint = remaining.lastIndexOf('! ', maxLength);
+      }
+      if (breakPoint < maxLength * 0.5) {
+        breakPoint = remaining.lastIndexOf('\n', maxLength);
+      }
+      if (breakPoint < maxLength * 0.5) {
+        breakPoint = remaining.lastIndexOf(' ', maxLength);
+      }
+      if (breakPoint < 1) {
+        breakPoint = maxLength;
+      } else {
+        breakPoint += 1; // Include the punctuation
+      }
+
+      chunks.push(remaining.slice(0, breakPoint).trim());
+      remaining = remaining.slice(breakPoint).trim();
+    }
+
+    return chunks.filter(c => c.length > 0);
+  };
+
+  const startStreamingFrom = async (percent = 0) => {
+    if (!ttsReady) {
+      setStatusMessage("TTS server not ready yet");
       return;
     }
+
     const slicedText = sliceTextFromPercent(percent);
-    if (!slicedText) {
+    if (!slicedText || slicedText.trim().length === 0) {
       setStatusMessage("No text to stream yet.");
       return;
     }
+
+    // Split into chunks for the API
+    const textChunks = splitTextIntoChunks(slicedText);
+    console.log(`Streaming ${textChunks.length} text chunks`);
+
     const offsetChars = Math.floor((percent / 100) * (currentText?.length || 0));
     setReadChars(offsetChars);
     readCharsRef.current = offsetChars;
@@ -332,14 +361,100 @@ export default function Home() {
     isStreamingRef.current = true;
     setStatusMessage("Generating audio...");
     processedChunksRef.current = 0;
-    totalChunksRef.current = 0;
+    totalChunksRef.current = textChunks.length;
     setStreamingProgress(0);
     scrollRenditionToPercent(percent);
-    workerRef.current.postMessage({
-      text: slicedText,
-      voice: selectedVoice,
-      speed: cadence,
-    });
+
+    // Create abort controller for this request
+    abortControllerRef.current = new AbortController();
+
+    try {
+      // Process each text chunk sequentially
+      for (let chunkIndex = 0; chunkIndex < textChunks.length; chunkIndex++) {
+        if (!isStreamingRef.current) break;
+
+        const textChunk = textChunks[chunkIndex];
+        setStatusMessage(`Generating audio (${chunkIndex + 1}/${textChunks.length})...`);
+
+        const response = await fetch(`${TTS_API_URL}/tts/stream`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: textChunk,
+            voice: selectedVoice,
+            speed: cadence,
+          }),
+          signal: abortControllerRef.current.signal,
+        });
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          console.error("TTS API error:", response.status, errorBody);
+          throw new Error(`TTS request failed: ${response.status} - ${errorBody}`);
+        }
+
+        const reader = response.body?.getReader();
+        if (!reader) {
+          throw new Error("No response body");
+        }
+
+        let buffer = new Uint8Array(0);
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          // Append new data to buffer
+          const newBuffer = new Uint8Array(buffer.length + value.length);
+          newBuffer.set(buffer);
+          newBuffer.set(value, buffer.length);
+          buffer = newBuffer;
+
+          // Try to parse chunks from buffer
+          // Format: 4 bytes length (big-endian) + 2 bytes text length + text + wav data
+          while (buffer.length >= 6) {
+            const wavLength = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
+            const textLength = (buffer[4] << 8) | buffer[5];
+            const totalLength = 6 + textLength + wavLength;
+
+            if (buffer.length < totalLength) {
+              break; // Wait for more data
+            }
+
+            const textBytes = buffer.slice(6, 6 + textLength);
+            const text = new TextDecoder().decode(textBytes);
+            const wavData = buffer.slice(6 + textLength, totalLength);
+
+            // Process the chunk
+            await enqueueAudioFromWav(wavData.buffer.slice(wavData.byteOffset, wavData.byteOffset + wavData.byteLength), text);
+
+            // Remove processed data from buffer
+            buffer = buffer.slice(totalLength);
+          }
+        }
+
+        // Update progress after each text chunk completes
+        processedChunksRef.current = chunkIndex + 1;
+        setStreamingProgress(Math.round(((chunkIndex + 1) / textChunks.length) * 100));
+      }
+
+      setIsStreaming(false);
+      isStreamingRef.current = false;
+      setStatusMessage("Streaming complete");
+      setStreamingProgress(100);
+
+    } catch (error) {
+      if ((error as Error).name === "AbortError") {
+        console.log("TTS request aborted");
+      } else {
+        console.error("TTS streaming error:", error);
+        setStatusMessage(`Error: ${(error as Error).message}`);
+      }
+      setIsStreaming(false);
+      isStreamingRef.current = false;
+    }
   };
 
   const handleFile = async (file: File) => {
@@ -349,7 +464,6 @@ export default function Home() {
     bookRef.current?.destroy?.();
     renditionRef.current?.destroy?.();
 
-    // Read the file into an ArrayBuffer so ePub opens it as a binary archive instead of a URL
     const buffer = await file.arrayBuffer();
     const book = ePub(buffer, { openAs: "binary" }) as unknown as EpubBook;
     bookRef.current = book;
@@ -367,7 +481,6 @@ export default function Home() {
       console.log("Rendition rendered view:", view);
       const iframe = (view as { iframe?: HTMLIFrameElement }).iframe;
       if (iframe) {
-        // Remove sandboxing so we can read text and keep scripts working
         iframe.removeAttribute("sandbox");
         iframe.allow = "autoplay; encrypted-media";
       }
@@ -434,8 +547,6 @@ export default function Home() {
     console.log("hydrateTextFallback. Live href:", liveHref);
     if (!liveHref || !bookRef.current) return;
 
-    // Use book.load() which correctly handles the internal archive/buffer
-    // section.render() tries to fetch via XHR relative to the page, causing 404s for local blobs
     try {
       console.log("Attempting book.load() for:", liveHref);
       const content = await bookRef.current.load(liveHref);
@@ -469,7 +580,6 @@ export default function Home() {
     setActiveHref(resolved);
     await renditionRef.current.display(resolved).catch(async (err) => {
       console.warn("Display chapter failed:", err);
-      // Try falling back to a best-effort match in the spine
       const fallback = bookRef.current?.spine?.items?.[0]?.href;
       if (fallback) {
         console.warn("Retrying with fallback spine href:", fallback);
@@ -483,14 +593,13 @@ export default function Home() {
   const startStreaming = () => {
     const effective = getEffectiveProgress();
     if (isStreaming) {
-      // Treat as pause: capture where we are, then stop but keep offset
       const pausePoint = effective;
       stopAudio(false);
       setStreamBaseOffset(pausePoint);
       setStatusMessage("Paused");
       return;
     }
-    startStreamingFrom(streamBaseOffset || 0);
+    void startStreamingFrom(streamBaseOffset || 0);
   };
 
   const handleTimelineScrub = (value: number) => {
@@ -499,7 +608,7 @@ export default function Home() {
 
   const commitTimelineScrub = (value: number) => {
     setUserScrub(null);
-    startStreamingFrom(value);
+    void startStreamingFrom(value);
   };
 
   const timelinePercent = userScrub ?? getEffectiveProgress();
@@ -530,6 +639,24 @@ export default function Home() {
     overlay.scrollTo({ top: target, behavior: "auto" });
   }, [readChars, currentText.length]);
 
+  // Server status indicator component
+  const ServerStatusBadge = () => {
+    const statusConfig = {
+      connecting: { icon: Wifi, color: "text-yellow-500", label: "Connecting..." },
+      ready: { icon: Wifi, color: "text-green-500", label: "Server ready" },
+      error: { icon: WifiOff, color: "text-red-500", label: "Server offline" },
+    };
+    const config = statusConfig[serverStatus];
+    const Icon = config.icon;
+
+    return (
+      <div className={`flex items-center gap-1.5 text-xs ${config.color}`}>
+        <Icon className="h-3.5 w-3.5" />
+        <span>{config.label}</span>
+      </div>
+    );
+  };
+
   return (
     <div className="relative min-h-screen overflow-hidden bg-[var(--bg)] text-[var(--text)]">
       <div className="pointer-events-none absolute inset-0 -z-10 opacity-90">
@@ -544,6 +671,7 @@ export default function Home() {
             <div className="space-y-1">
               <h1 className="text-3xl font-semibold tracking-tight">Free EPUB reader</h1>
             </div>
+            <ServerStatusBadge />
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
             Drop an EPUB, browse chapters, choose a voice, and stream audio with adjustable cadence.
@@ -567,12 +695,7 @@ export default function Home() {
                 <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
                 <BookOpen className="h-4 w-4" /> Select EPUB
               </label>
-              <div className="flex items-center gap-2 text-xs text-[var(--muted)]">
-                <span className="h-2 w-2 rounded-full bg-[var(--accent)]/60" />
-                {loadingProgress > 0
-                  ? `Model ${loadingProgress}%`
-                  : "Model loads on first play (downloads once)"}
-              </div>
+              <ServerStatusBadge />
             </div>
 
             <div className="grid grid-cols-1 gap-4 pt-4 lg:grid-cols-[240px_1fr]">
@@ -623,7 +746,7 @@ export default function Home() {
           <aside className="surface p-5">
             <div className="flex items-center justify-between">
               <h2 className="text-lg font-semibold">Text to speech</h2>
-              <span className="text-xs text-[var(--muted)]">Kokoro</span>
+              <span className="text-xs text-[var(--muted)]">Kokoro (Server)</span>
             </div>
             <div className="divider my-4" />
             <div className="space-y-4">
@@ -673,7 +796,7 @@ export default function Home() {
                 <button
                   onClick={startStreaming}
                   className="flex flex-1 items-center gap-2 text-left text-base font-semibold text-[var(--text)] hover:text-[var(--accent)]"
-                  disabled={!ttsReady && !loadingProgress}
+                  disabled={!ttsReady}
                 >
                   {isStreaming ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                   {isStreaming ? "Pause" : "Play"}
@@ -682,16 +805,6 @@ export default function Home() {
               </div>
 
               <div className="space-y-3">
-                <div className="flex justify-between text-xs text-[var(--muted)]">
-                  <span>Model</span>
-                  <span>{loadingProgress}%</span>
-                </div>
-                <div className="h-1.5 overflow-hidden rounded-full bg-[var(--stroke)]">
-                  <div
-                    className="h-full rounded-full bg-[var(--accent)] transition-all"
-                    style={{ width: `${loadingProgress}%` }}
-                  />
-                </div>
                 <div className="flex justify-between text-xs text-[var(--muted)]">
                   <span>Streaming</span>
                   <span>{streamingProgress}%</span>
@@ -713,7 +826,7 @@ export default function Home() {
             <button
               onClick={startStreaming}
               className="flex items-center gap-2 text-sm font-semibold"
-              disabled={!ttsReady && !loadingProgress}
+              disabled={!ttsReady}
             >
               {isStreaming ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
               {isStreaming ? "Pause" : "Play"}
