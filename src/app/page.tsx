@@ -223,16 +223,23 @@ export default function Home() {
 
   const enqueueAudioFromWav = useCallback(
     async (wavData: ArrayBuffer, textChunk?: string) => {
-      if (!isStreamingRef.current) return;
+      if (!isStreamingRef.current) {
+        console.log("Skipping audio - streaming stopped");
+        return;
+      }
       const ctx = ensureAudioContext();
+      console.log("Received WAV data:", wavData.byteLength, "bytes, text:", textChunk?.slice(0, 50));
 
       try {
         // Decode WAV audio data
         const audioBuffer = await ctx.decodeAudioData(wavData.slice(0));
+        console.log("Decoded audio buffer:", audioBuffer.duration, "seconds", audioBuffer.numberOfChannels, "channels");
         queueRef.current.push({ buffer: audioBuffer, text: textChunk });
+        console.log("Audio queue length:", queueRef.current.length);
         void playQueue();
       } catch (error) {
         console.error("Failed to decode audio:", error);
+        console.error("WAV data first bytes:", new Uint8Array(wavData.slice(0, 20)));
       }
     },
     [ensureAudioContext, playQueue],
