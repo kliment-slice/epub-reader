@@ -5,17 +5,25 @@ A FastAPI server that provides text-to-speech using the Kokoro ONNX model.
 Designed to be deployed on Fly.io and called from a Cloudflare Pages frontend.
 """
 
+import asyncio
 import io
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Literal
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
+
+# Constrain ONNX Runtime threads so one instance does not starve a shared CPU.
+os.environ.setdefault("ORT_INTRA_OP_NUM_THREADS", os.environ.get("TTS_INTRA_OP_THREADS", "1"))
+os.environ.setdefault("ORT_INTER_OP_NUM_THREADS", os.environ.get("TTS_INTER_OP_THREADS", "1"))
+os.environ.setdefault("OMP_NUM_THREADS", os.environ.get("TTS_OMP_NUM_THREADS", "1"))
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -23,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 # Global model instance
 kokoro_instance = None
+# Limit concurrent synth jobs per instance to encourage autoscaler to pick up extra load.
+MAX_CONCURRENT_SYNTH = max(1, int(os.environ.get("TTS_MAX_CONCURRENCY", "1")))
+inference_semaphore = asyncio.Semaphore(MAX_CONCURRENT_SYNTH)
 
 # Available voices (matching the JS implementation)
 VOICES = {
@@ -162,6 +173,22 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down TTS API...")
 
 
+async def synthesize_to_wav_bytes(text: str, voice: str, speed: float) -> bytes:
+    """Run Kokoro inference off the event loop and return WAV bytes."""
+    def _run():
+        samples, sample_rate = kokoro_instance.create(
+            text,
+            voice=voice,
+            speed=speed,
+        )
+        buffer = io.BytesIO()
+        sf.write(buffer, samples, sample_rate, format="WAV")
+        buffer.seek(0)
+        return buffer.read()
+
+    return await asyncio.to_thread(_run)
+
+
 app = FastAPI(
     title="Kokoro TTS API",
     description="Text-to-Speech API using Kokoro ONNX model",
@@ -227,7 +254,7 @@ async def get_voices():
 
 
 @app.post("/tts")
-async def generate_tts(request: TTSRequest):
+async def generate_tts(payload: TTSRequest, client_request: Request):
     """
     Generate TTS audio from text.
     
@@ -236,27 +263,25 @@ async def generate_tts(request: TTSRequest):
     if not kokoro_instance:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
     
-    if request.voice not in VOICES:
+    if payload.voice not in VOICES:
         raise HTTPException(
             status_code=400, 
-            detail=f"Unknown voice: {request.voice}. Available: {list(VOICES.keys())}"
+            detail=f"Unknown voice: {payload.voice}. Available: {list(VOICES.keys())}"
         )
     
     try:
-        # Generate audio
-        samples, sample_rate = kokoro_instance.create(
-            request.text,
-            voice=request.voice,
-            speed=request.speed,
-        )
-        
-        # Convert to WAV bytes
-        buffer = io.BytesIO()
-        sf.write(buffer, samples, sample_rate, format="WAV")
-        buffer.seek(0)
-        
+        async with inference_semaphore:
+            audio_bytes = await synthesize_to_wav_bytes(
+                payload.text,
+                payload.voice,
+                payload.speed,
+            )
+
+        if await client_request.is_disconnected():
+            raise HTTPException(status_code=499, detail="Client disconnected")
+
         return Response(
-            content=buffer.read(),
+            content=audio_bytes,
             media_type="audio/wav",
             headers={
                 "Content-Disposition": "inline",
@@ -269,7 +294,7 @@ async def generate_tts(request: TTSRequest):
 
 
 @app.post("/tts/stream")
-async def generate_tts_stream(request: TTSRequest):
+async def generate_tts_stream(payload: TTSRequest, client_request: Request):
     """
     Generate TTS audio from text with streaming.
     
@@ -279,37 +304,39 @@ async def generate_tts_stream(request: TTSRequest):
     if not kokoro_instance:
         raise HTTPException(status_code=503, detail="Model not loaded yet")
     
-    if request.voice not in VOICES:
+    if payload.voice not in VOICES:
         raise HTTPException(
             status_code=400,
-            detail=f"Unknown voice: {request.voice}. Available: {list(VOICES.keys())}"
+            detail=f"Unknown voice: {payload.voice}. Available: {list(VOICES.keys())}"
         )
     
-    chunks = split_text_smart(request.text, max_chunk_length=300)
+    chunks = split_text_smart(payload.text, max_chunk_length=300)
     
     async def generate():
         for i, chunk in enumerate(chunks):
+            if await client_request.is_disconnected():
+                logger.info("Client disconnected, stopping stream early")
+                break
             try:
                 logger.info(f"Generating chunk {i+1}/{len(chunks)}: {chunk[:50]}...")
                 
-                samples, sample_rate = kokoro_instance.create(
-                    chunk,
-                    voice=request.voice,
-                    speed=request.speed,
-                )
-                
-                # Convert to WAV bytes
-                buffer = io.BytesIO()
-                sf.write(buffer, samples, sample_rate, format="WAV")
-                buffer.seek(0)
-                wav_bytes = buffer.read()
+                async with inference_semaphore:
+                    wav_bytes = await synthesize_to_wav_bytes(
+                        chunk,
+                        payload.voice,
+                        payload.speed,
+                    )
                 
                 # Yield chunk with metadata header
                 # Format: 4 bytes length (big-endian) + text length (2 bytes) + text + wav data
                 text_bytes = chunk.encode('utf-8')
                 header = len(wav_bytes).to_bytes(4, 'big') + len(text_bytes).to_bytes(2, 'big') + text_bytes
                 yield header + wav_bytes
-                
+            
+            except asyncio.CancelledError:
+                logger.info("Streaming cancelled by client")
+                break
+            
             except Exception as e:
                 logger.error(f"Failed to generate chunk {i+1}: {e}")
                 # Continue with next chunk instead of failing entirely

@@ -19,8 +19,10 @@ primary_region = 'iad'
 
   [http_service.concurrency]
     type = 'requests'
-    hard_limit = 25
-    soft_limit = 20
+    # Each machine only handles a couple of in-flight requests; others spill to
+    # additional machines (auto-started if present).
+    hard_limit = 2
+    soft_limit = 1
 
 [checks]
   [checks.health]

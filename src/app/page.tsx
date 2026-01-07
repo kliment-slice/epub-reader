@@ -5,6 +5,8 @@ import { Pause, Play, Square, BookOpen, Wifi, WifiOff } from "lucide-react";
 
 // TTS API configuration
 const TTS_API_URL = process.env.NEXT_PUBLIC_TTS_API_URL || "http://localhost:8080";
+const PREFETCH_CHARS = 50; // Very small for sub-500ms first response
+const PREFETCH_LOOKAHEAD = 5; // More chunks to compensate for smaller size
 
 type Voice = {
   name: string;
@@ -68,12 +70,27 @@ export default function Home() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const sourceRef = useRef<AudioBufferSourceNode | null>(null);
   const queueRef = useRef<{ buffer: AudioBuffer; text?: string }[]>([]);
+  const prefetchedAudioRef = useRef<{
+    buffer: AudioBuffer;
+    text: string;
+    chars: number;
+    voice: string;
+    speed: number;
+  } | null>(null);
+  const prefetchAbortRef = useRef<AbortController | null>(null);
   const playingRef = useRef(false);
   const isStreamingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
   const totalChunksRef = useRef(0);
   const processedChunksRef = useRef(0);
   const chunkAnimationRef = useRef<number | null>(null);
+  // Queue of prefetched audio chunks for instant playback
+  const prefetchQueueRef = useRef<{
+    buffer: AudioBuffer;
+    text: string;
+    startChar: number;
+    endChar: number;
+  }[]>([]);
 
   const [chapters, setChapters] = useState<(TocItem & { depth: number })[]>([]);
   const [activeHref, setActiveHref] = useState<string | null>(null);
@@ -137,6 +154,7 @@ export default function Home() {
     warmupServer();
   }, []);
 
+
   const ensureAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContext();
@@ -158,6 +176,77 @@ export default function Home() {
     }
     return boundaries;
   };
+
+  const prefetchFirstChunk = useCallback(async () => {
+    if (!ttsReady || !currentText || isStreamingRef.current) return;
+
+    prefetchAbortRef.current?.abort();
+    const controller = new AbortController();
+    prefetchAbortRef.current = controller;
+
+    // Clear old prefetch
+    prefetchQueueRef.current = [];
+    prefetchedAudioRef.current = null;
+
+    // Only prefetch FIRST chunk - no parallel requests to avoid queue delays
+    const text = currentText.slice(0, PREFETCH_CHARS).trim();
+    if (!text) return;
+
+    console.log(`[Prefetch] Fetching first ${text.length} chars...`);
+    const fetchStart = performance.now();
+
+    try {
+      const response = await fetch(`${TTS_API_URL}/tts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text,
+          voice: selectedVoice,
+          speed: cadence,
+        }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        console.warn("[Prefetch] Failed:", response.status);
+        return;
+      }
+
+      const wav = await response.arrayBuffer();
+      const ctx = ensureAudioContext();
+      const buffer = await ctx.decodeAudioData(wav.slice(0));
+
+      prefetchedAudioRef.current = {
+        buffer,
+        text,
+        chars: text.length,
+        voice: selectedVoice,
+        speed: cadence,
+      };
+
+      // Also store in queue for new playback code
+      prefetchQueueRef.current = [{ buffer, text, startChar: 0, endChar: text.length }];
+
+      console.log(`[Prefetch] Ready in ${Math.round(performance.now() - fetchStart)}ms`);
+    } catch (error) {
+      if ((error as Error).name !== "AbortError") {
+        console.warn("[Prefetch] Error:", error);
+      }
+    } finally {
+      if (prefetchAbortRef.current === controller) {
+        prefetchAbortRef.current = null;
+      }
+    }
+  }, [cadence, currentText, ensureAudioContext, selectedVoice, ttsReady]);
+
+  // Prefetch first chunk when ready
+  useEffect(() => {
+    if (!ttsReady || !currentText || isStreaming) return;
+    void prefetchFirstChunk();
+    return () => {
+      prefetchAbortRef.current?.abort();
+    };
+  }, [ttsReady, currentText, selectedVoice, cadence, isStreaming, prefetchFirstChunk]);
 
   const normalizeForPlayback = (text: string) => text.replace(/\s+/g, " ").trim();
 
@@ -303,8 +392,8 @@ export default function Home() {
     return currentText.slice(start);
   };
 
-  // Split text into chunks suitable for TTS (max 8000 chars each to stay under API limit)
-  const splitTextIntoChunks = (text: string, maxLength = 8000): string[] => {
+  // Split text into chunks for TTS - 100 chars = ~500ms per chunk
+  const splitTextIntoChunks = (text: string, maxLength = 100): string[] => {
     if (text.length <= maxLength) return [text];
 
     const chunks: string[] = [];
@@ -355,21 +444,57 @@ export default function Home() {
       return;
     }
 
-    // Split into chunks for the API
-    const textChunks = splitTextIntoChunks(slicedText);
-    console.log(`Streaming ${textChunks.length} text chunks`);
-
-    const offsetChars = Math.floor((percent / 100) * (currentText?.length || 0));
-    setReadChars(offsetChars);
-    readCharsRef.current = offsetChars;
     stopAudio(false);
+
+    // Check if we have prefetched chunks ready for instant playback
+    const prefetchQueue = prefetchQueueRef.current;
+    const canUsePrefetch =
+      percent === 0 &&
+      prefetchQueue.length > 0 &&
+      prefetchedAudioRef.current?.voice === selectedVoice &&
+      prefetchedAudioRef.current?.speed === cadence;
+
+    let leadChars = 0;
+    if (canUsePrefetch) {
+      // Queue ALL prefetched chunks for instant playback!
+      for (const chunk of prefetchQueue) {
+        queueRef.current.push({ buffer: chunk.buffer, text: chunk.text });
+        leadChars = chunk.endChar; // Track where prefetched audio ends
+      }
+      void playQueue(); // Start playing immediately
+      console.log(`Using ${prefetchQueue.length} prefetched audio chunks (${leadChars} chars)`);
+      setStatusMessage("Playing...");
+    }
+
+    // Calculate remaining text after prefetched content
+    const remainingText = slicedText.slice(leadChars).trim();
+
+    // If all text was prefetched, we're done fetching
+    if (!remainingText) {
+      setIsStreaming(true);
+      isStreamingRef.current = true;
+      setStreamingProgress(100);
+      return;
+    }
+
+    // Split remaining text into chunks for the API
+    const textChunks = splitTextIntoChunks(remainingText);
+    console.log(`Streaming ${textChunks.length} additional text chunks`);
+
+    const offsetChars = Math.floor((percent / 100) * (currentText?.length || 0)) + leadChars;
+    setReadChars(canUsePrefetch ? 0 : offsetChars);
+    readCharsRef.current = canUsePrefetch ? 0 : offsetChars;
     setStreamBaseOffset(percent);
     setIsStreaming(true);
     isStreamingRef.current = true;
-    setStatusMessage("Generating audio...");
-    processedChunksRef.current = 0;
-    totalChunksRef.current = textChunks.length;
-    setStreamingProgress(0);
+    if (!canUsePrefetch) setStatusMessage("Generating audio...");
+    processedChunksRef.current = canUsePrefetch ? prefetchQueue.length : 0;
+    totalChunksRef.current = textChunks.length + (canUsePrefetch ? prefetchQueue.length : 0);
+    setStreamingProgress(
+      totalChunksRef.current > 0
+        ? Math.round((processedChunksRef.current / totalChunksRef.current) * 100)
+        : 0,
+    );
     scrollRenditionToPercent(percent);
 
     // Create abort controller for this request
@@ -383,7 +508,7 @@ export default function Home() {
         const textChunk = textChunks[chunkIndex];
         setStatusMessage(`Generating audio (${chunkIndex + 1}/${textChunks.length})...`);
 
-        const response = await fetch(`${TTS_API_URL}/tts/stream`, {
+        const response = await fetch(`${TTS_API_URL}/tts`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -402,61 +527,30 @@ export default function Home() {
           throw new Error(`TTS request failed: ${response.status} - ${errorBody}`);
         }
 
-        const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error("No response body");
-        }
+        // Simple: just get the WAV and enqueue it
+        const wavData = await response.arrayBuffer();
+        await enqueueAudioFromWav(wavData, textChunk);
 
-        let buffer = new Uint8Array(0);
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          // Append new data to buffer
-          const newBuffer = new Uint8Array(buffer.length + value.length);
-          newBuffer.set(buffer);
-          newBuffer.set(value, buffer.length);
-          buffer = newBuffer;
-
-          // Try to parse chunks from buffer
-          // Format: 4 bytes length (big-endian) + 2 bytes text length + text + wav data
-          while (buffer.length >= 6) {
-            const wavLength = (buffer[0] << 24) | (buffer[1] << 16) | (buffer[2] << 8) | buffer[3];
-            const textLength = (buffer[4] << 8) | buffer[5];
-            const totalLength = 6 + textLength + wavLength;
-
-            if (buffer.length < totalLength) {
-              break; // Wait for more data
-            }
-
-            const textBytes = buffer.slice(6, 6 + textLength);
-            const text = new TextDecoder().decode(textBytes);
-            const wavData = buffer.slice(6 + textLength, totalLength);
-
-            // Process the chunk
-            await enqueueAudioFromWav(wavData.buffer.slice(wavData.byteOffset, wavData.byteOffset + wavData.byteLength), text);
-
-            // Remove processed data from buffer
-            buffer = buffer.slice(totalLength);
-          }
-        }
-
-        // Update progress after each text chunk completes
-        processedChunksRef.current = chunkIndex + 1;
-        setStreamingProgress(Math.round(((chunkIndex + 1) / textChunks.length) * 100));
+        // Update progress after each chunk
+        const completed = (canUsePrefetch ? prefetchQueue.length : 0) + chunkIndex + 1;
+        processedChunksRef.current = completed;
+        setStreamingProgress(
+          totalChunksRef.current > 0
+            ? Math.round((completed / totalChunksRef.current) * 100)
+            : 0,
+        );
       }
 
       setIsStreaming(false);
       isStreamingRef.current = false;
-      setStatusMessage("Streaming complete");
+      setStatusMessage("Complete");
       setStreamingProgress(100);
 
     } catch (error) {
       if ((error as Error).name === "AbortError") {
         console.log("TTS request aborted");
       } else {
-        console.error("TTS streaming error:", error);
+        console.error("TTS error:", error);
         setStatusMessage(`Error: ${(error as Error).message}`);
       }
       setIsStreaming(false);
@@ -650,8 +744,8 @@ export default function Home() {
   const ServerStatusBadge = () => {
     const statusConfig = {
       connecting: { icon: Wifi, color: "text-yellow-500", label: "Connecting..." },
-      ready: { icon: Wifi, color: "text-green-500", label: "Server ready" },
-      error: { icon: WifiOff, color: "text-red-500", label: "Server offline" },
+      ready: { icon: Wifi, color: "text-green-500", label: "Ready" },
+      error: { icon: WifiOff, color: "text-red-500", label: "Offline" },
     };
     const config = statusConfig[serverStatus];
     const Icon = config.icon;
@@ -678,10 +772,9 @@ export default function Home() {
             <div className="space-y-1">
               <h1 className="text-3xl font-semibold tracking-tight">Free EPUB reader</h1>
             </div>
-            <ServerStatusBadge />
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
-            Drop an EPUB, browse chapters, choose a voice, and stream audio with adjustable cadence.
+            Upload an EPUB and stream your audio. Blazing fast.
           </p>
         </header>
 
@@ -700,7 +793,7 @@ export default function Home() {
                   }}
                 />
                 <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
-                <BookOpen className="h-4 w-4" /> Select EPUB
+                <BookOpen className="h-4 w-4" /> Upload EPUB
               </label>
               <ServerStatusBadge />
             </div>
@@ -751,11 +844,6 @@ export default function Home() {
           </section>
 
           <aside className="surface p-5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Text to speech</h2>
-              <span className="text-xs text-[var(--muted)]">Kokoro (Server)</span>
-            </div>
-            <div className="divider my-4" />
             <div className="space-y-4">
               <div className="space-y-2">
                 <label className="label">Voice</label>

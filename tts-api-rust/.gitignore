@@ -1,0 +1,6 @@
+# Build artifacts
+target/
+
+# Model files (cached locally, download once)
+models/*.onnx
+models/*.bin
