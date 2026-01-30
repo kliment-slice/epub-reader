@@ -126,7 +126,13 @@ async fn run() -> Result<(), ApiError> {
         semaphore,
     };
 
-    warmup(&state).await;
+    // Spawn warmup in background so server starts immediately
+    let warmup_state = state.clone();
+    tokio::spawn(async move {
+        info!("Starting warmup...");
+        warmup(&warmup_state).await;
+        info!("Warmup complete");
+    });
 
     let cors = cors_layer();
 
