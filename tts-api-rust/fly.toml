@@ -1,25 +1,23 @@
-# Fly.io configuration for TTS API (Rust)
+# fly.toml app configuration file generated for epub-reader-tts on 2026-01-30T15:25:16Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
 app = 'epub-reader-tts'
 primary_region = 'iad'
 
 [build]
-  dockerfile = 'Dockerfile'
-
-[env]
-  PORT = '8080'
-  KOKORO_MODEL = '/app/kokoro-v1.0.onnx'
-  KOKORO_VOICES = '/app/voices-v1.0.bin'
-  TTS_MAX_CONCURRENCY = '1'
 
 [http_service]
   internal_port = 8080
   force_https = true
   auto_stop_machines = 'stop'
   auto_start_machines = true
-  min_machines_running = 0  # Scale to zero when idle
+  min_machines_running = 0
   processes = ['app']
 
 [[vm]]
-  memory = '2gb'
+  memory = '1gb'
   cpu_kind = 'shared'
-  cpus = 2
+  cpus = 1
+  memory_mb = 2048
