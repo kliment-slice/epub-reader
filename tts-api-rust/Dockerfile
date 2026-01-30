@@ -59,24 +59,12 @@ COPY --from=builder /app/target/release/tts-api-rust /usr/local/bin/tts-api-rust
 COPY --from=builder /app/config.json /app/config.json
 COPY --from=builder /app/onnx_libs/ /usr/lib/
 
-# Copy models if available locally, otherwise download
-# This allows local builds to use cached 350MB files while deploys can still work
-COPY models/ /app/models_cache/
-RUN if [ -f /app/models_cache/kokoro-v1.0.onnx ]; then \
-    echo "Using cached kokoro-v1.0.onnx"; \
-    cp /app/models_cache/kokoro-v1.0.onnx /app/; \
-    else \
-    echo "Downloading kokoro-v1.0.onnx..."; \
-    wget -q https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx; \
-    fi && \
-    if [ -f /app/models_cache/voices-v1.0.bin ]; then \
-    echo "Using cached voices-v1.0.bin"; \
-    cp /app/models_cache/voices-v1.0.bin /app/; \
-    else \
-    echo "Downloading voices-v1.0.bin..."; \
-    wget -q https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin; \
-    fi && \
-    rm -rf /app/models_cache
+# Download models from GitHub releases (models are gitignored, ~350MB total)
+RUN echo "Downloading kokoro-v1.0.onnx..." && \
+    wget -q --show-progress https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx && \
+    echo "Downloading voices-v1.0.bin..." && \
+    wget -q --show-progress https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin && \
+    ls -la /app/*.onnx /app/*.bin
 
 ENV PORT=8080 LD_LIBRARY_PATH=/usr/lib
 EXPOSE 8080

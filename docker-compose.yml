@@ -39,6 +39,8 @@ services:
     environment:
       RUST_LOG: info
       RUST_BACKTRACE: 1
+      KOKORO_MODEL: /app/models/kokoro-v1.0.onnx
+      KOKORO_VOICES: /app/models/voices-v1.0.bin
     restart: unless-stopped
 
 volumes:

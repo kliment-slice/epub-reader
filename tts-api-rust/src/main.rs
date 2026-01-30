@@ -149,7 +149,19 @@ async fn run() -> Result<(), ApiError> {
 }
 
 async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
+    use tokio::signal::unix::{signal, SignalKind};
+    
+    let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+    let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+    
+    tokio::select! {
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down...");
+        }
+        _ = sigint.recv() => {
+            info!("Received SIGINT, shutting down...");
+        }
+    }
 }
 
 fn cors_layer() -> CorsLayer {
