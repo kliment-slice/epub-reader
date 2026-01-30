@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Pause, Play, Square, BookOpen, Wifi, WifiOff } from "lucide-react";
+import { Pause, Play, Square, BookOpen, Wifi, WifiOff, ChevronDown, User } from "lucide-react";
+import { authClient } from "@/lib/auth-client";
 
 // TTS API configuration
 const TTS_API_URL = process.env.NEXT_PUBLIC_TTS_API_URL || "http://localhost:8080";
@@ -107,6 +108,15 @@ export default function Home() {
   const [userScrub, setUserScrub] = useState<number | null>(null);
   const [readChars, setReadChars] = useState(0);
   const readCharsRef = useRef(0);
+  const authMenuRef = useRef<HTMLDivElement | null>(null);
+  const accountMenuRef = useRef<HTMLDivElement | null>(null);
+  const [authMenuOpen, setAuthMenuOpen] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const { data: session, isPending: sessionPending } = authClient.useSession();
+  const displayName = session?.user?.name || session?.user?.email || "Account";
+  const displayEmail =
+    session?.user?.email && session.user.email !== displayName ? session.user.email : null;
+  const authButtonLabel = session ? displayName : sessionPending ? "Loading..." : "Sign in";
 
   // Warmup the TTS server on page load
   useEffect(() => {
@@ -154,12 +164,68 @@ export default function Home() {
     warmupServer();
   }, []);
 
+  useEffect(() => {
+    if (!authMenuOpen && !accountMenuOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node;
+      const clickedAuth = authMenuRef.current?.contains(target);
+      const clickedAccount = accountMenuRef.current?.contains(target);
+      if (!clickedAuth && !clickedAccount) {
+        setAuthMenuOpen(false);
+        setAccountMenuOpen(false);
+      }
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setAuthMenuOpen(false);
+        setAccountMenuOpen(false);
+      }
+    };
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [authMenuOpen, accountMenuOpen]);
+
+  useEffect(() => {
+    if (session) {
+      setAuthMenuOpen(false);
+    }
+    if (!session) {
+      setAccountMenuOpen(false);
+    }
+  }, [session]);
+
 
   const ensureAudioContext = useCallback(() => {
     if (!audioContextRef.current) {
       audioContextRef.current = new AudioContext();
     }
     return audioContextRef.current;
+  }, []);
+
+  const handleSocialSignIn = useCallback(async (provider: "google" | "apple") => {
+    try {
+      setAuthMenuOpen(false);
+      setAccountMenuOpen(false);
+      await authClient.signIn.social({ provider });
+    } catch (error) {
+      console.error("Failed to start social sign-in:", error);
+    }
+  }, []);
+
+  const handleSignOut = useCallback(async () => {
+    try {
+      setAccountMenuOpen(false);
+      await authClient.signOut();
+    } catch (error) {
+      console.error("Failed to sign out:", error);
+    }
   }, []);
 
   const getWordBoundaries = (text: string) => {
@@ -772,9 +838,71 @@ export default function Home() {
             <div className="space-y-1">
               <h1 className="text-3xl font-semibold tracking-tight">Free EPUB reader</h1>
             </div>
+            <div className="relative" ref={session ? accountMenuRef : authMenuRef}>
+              <button
+                type="button"
+                className="auth-button"
+                onClick={() => {
+                  if (sessionPending) return;
+                  if (session) {
+                    setAuthMenuOpen(false);
+                    setAccountMenuOpen((open) => !open);
+                    return;
+                  }
+                  setAccountMenuOpen(false);
+                  setAuthMenuOpen((open) => !open);
+                }}
+                aria-haspopup="menu"
+                aria-expanded={session ? accountMenuOpen : authMenuOpen}
+              >
+                <span className="h-2 w-2 rounded-full bg-[var(--accent)]" />
+                <User className="h-4 w-4" />
+                <span>{authButtonLabel}</span>
+                <ChevronDown className="h-4 w-4" />
+              </button>
+              {!session && authMenuOpen && (
+                <div className="auth-menu absolute right-0 z-20 mt-2 w-72 p-3">
+                  <p className="text-xs text-[var(--muted)]">Sign in with</p>
+                  <div className="mt-3 grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      className="auth-provider-button"
+                      onClick={() => handleSocialSignIn("google")}
+                    >
+                      Google
+                    </button>
+                    <button
+                      type="button"
+                      className="auth-provider-button"
+                      onClick={() => handleSocialSignIn("apple")}
+                    >
+                      Apple
+                    </button>
+                  </div>
+                </div>
+              )}
+              {session && accountMenuOpen && (
+                <div className="auth-menu absolute right-0 z-20 mt-2 w-72 p-3">
+                  <p className="text-xs text-[var(--muted)]">Signed in as</p>
+                  <p className="mt-1 text-sm font-semibold">{displayName}</p>
+                  {displayEmail && (
+                    <p className="text-xs text-[var(--muted)]">{displayEmail}</p>
+                  )}
+                  <div className="mt-3">
+                    <button
+                      type="button"
+                      className="auth-provider-button"
+                      onClick={handleSignOut}
+                    >
+                      Sign out
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
           <p className="mt-3 text-sm text-[var(--muted)]">
-            Upload an EPUB and stream your audio. Blazing fast.
+            Upload an EPUB to stream audio. Blazing fast. Sign in to save and load your epubs.
           </p>
         </header>
 

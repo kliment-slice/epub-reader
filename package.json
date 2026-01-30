@@ -9,6 +9,9 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@opennextjs/cloudflare": "^1.14.8",
+    "better-auth": "^1.4.18",
+    "drizzle-orm": "^0.45.1",
     "epubjs": "^0.3.93",
     "lucide-react": "^0.562.0",
     "next": "16.1.6",
@@ -17,6 +20,7 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@cloudflare/workers-types": "^4.20250703.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",

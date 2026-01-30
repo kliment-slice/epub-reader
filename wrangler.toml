@@ -1,0 +1,8 @@
+name = "epub-reader"
+compatibility_date = "2026-01-30"
+compatibility_flags = ["nodejs_compat"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "epub_reader"
+database_id = "90bcfb81-644e-464a-ab15-2a33bdf90fe7"

@@ -24,8 +24,10 @@ services:
 
   tts-api:
     build:
-      context: ./tts-api-rust
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: tts-api-rust/Dockerfile
+      args:
+        SKIP_MODEL_DOWNLOAD: "true"
     working_dir: /app
     ports:
       - "8080:8080"

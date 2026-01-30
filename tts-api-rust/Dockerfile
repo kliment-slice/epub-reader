@@ -59,12 +59,17 @@ COPY --from=builder /app/target/release/tts-api-rust /usr/local/bin/tts-api-rust
 COPY --from=builder /app/config.json /app/config.json
 COPY --from=builder /app/onnx_libs/ /usr/lib/
 
-# Download models from GitHub releases (models are gitignored, ~350MB total)
-RUN echo "Downloading kokoro-v1.0.onnx..." && \
+# Download models from GitHub releases (skip for local builds with volume mounts)
+ARG SKIP_MODEL_DOWNLOAD=false
+RUN if [ "$SKIP_MODEL_DOWNLOAD" = "true" ]; then \
+    echo "Skipping model download (using volume mounts)"; \
+    else \
+    echo "Downloading kokoro-v1.0.onnx..." && \
     wget -q --show-progress https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx && \
     echo "Downloading voices-v1.0.bin..." && \
     wget -q --show-progress https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin && \
-    ls -la /app/*.onnx /app/*.bin
+    ls -la /app/*.onnx /app/*.bin; \
+    fi
 
 ENV PORT=8080 LD_LIBRARY_PATH=/usr/lib
 EXPOSE 8080

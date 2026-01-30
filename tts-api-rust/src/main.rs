@@ -109,66 +109,131 @@ async fn run() -> Result<(), ApiError> {
     eprintln!("[TTS] Starting up...");
     init_tracing();
     
-    // Bind port IMMEDIATELY so Fly health checks can connect
+    // Create shared state that will be populated once model loads
+    let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let app_state: Arc<tokio::sync::RwLock<Option<AppState>>> = Arc::new(tokio::sync::RwLock::new(None));
+    
+    // Clone for the loading task
+    let ready_clone = ready.clone();
+    let app_state_clone = app_state.clone();
+    
+    // Spawn model loading in background
+    tokio::spawn(async move {
+        let model_path = std::env::var("KOKORO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string());
+        let voices_path = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
+        eprintln!("[TTS] Model path: {model_path}");
+        eprintln!("[TTS] Voices path: {voices_path}");
+
+        eprintln!("[TTS] Loading model (this takes ~30s)...");
+        let session = match tokio::task::spawn_blocking(move || load_model(&model_path)).await {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => { eprintln!("[TTS] Failed to load model: {e}"); return; }
+            Err(e) => { eprintln!("[TTS] spawn_blocking failed: {e}"); return; }
+        };
+        eprintln!("[TTS] Model loaded");
+        
+        eprintln!("[TTS] Loading voices...");
+        let voices_path_clone = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
+        let voices = match tokio::task::spawn_blocking(move || load_voices(&voices_path_clone)).await {
+            Ok(Ok(v)) => Arc::new(v),
+            Ok(Err(e)) => { eprintln!("[TTS] Failed to load voices: {e}"); return; }
+            Err(e) => { eprintln!("[TTS] spawn_blocking failed: {e}"); return; }
+        };
+        eprintln!("[TTS] Voices loaded");
+        
+        let semaphore = Arc::new(Semaphore::new(
+            std::env::var("TTS_MAX_CONCURRENCY")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(MAX_CONCURRENCY),
+        ));
+
+        let state = AppState {
+            session: Arc::new(tokio::sync::Mutex::new(session)),
+            voices,
+            semaphore,
+        };
+
+        // Do warmup
+        eprintln!("[TTS] Starting warmup...");
+        warmup(&state).await;
+        eprintln!("[TTS] Warmup complete");
+
+        // Store state and mark ready
+        *app_state_clone.write().await = Some(state);
+        ready_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        eprintln!("[TTS] Server ready to handle TTS requests");
+    });
+
+    // Build router with loading-aware handlers
+    let cors = cors_layer();
+    
+    #[derive(Clone)]
+    struct SharedState {
+        ready: Arc<std::sync::atomic::AtomicBool>,
+        app_state: Arc<tokio::sync::RwLock<Option<AppState>>>,
+    }
+    
+    let shared = SharedState { ready, app_state };
+
+    let app = Router::new()
+        .route("/health", get(|State(s): State<SharedState>| async move {
+            let ready = s.ready.load(std::sync::atomic::Ordering::SeqCst);
+            Json(serde_json::json!({
+                "status": if ready { "healthy" } else { "loading" },
+                "model_loaded": ready
+            }))
+        }))
+        .route("/voices", get(|State(s): State<SharedState>| async move {
+            if !s.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "loading"}))).into_response();
+            }
+            let guard = s.app_state.read().await;
+            if let Some(_) = guard.as_ref() {
+                Json(VoicesResponse { voices: voice_meta() }).into_response()
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "loading"}))).into_response()
+            }
+        }))
+        .route("/tts", post(|State(s): State<SharedState>, Json(req): Json<TtsRequest>| async move {
+            if !s.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "loading"}))).into_response();
+            }
+            let guard = s.app_state.read().await;
+            if let Some(state) = guard.as_ref() {
+                match tts_inner(state, req).await {
+                    Ok(resp) => resp,
+                    Err(e) => e.into_response(),
+                }
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "loading"}))).into_response()
+            }
+        }))
+        .route("/tts/stream", post(|State(s): State<SharedState>, Json(req): Json<TtsRequest>| async move {
+            if !s.ready.load(std::sync::atomic::Ordering::SeqCst) {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "loading"}))).into_response();
+            }
+            let guard = s.app_state.read().await;
+            if let Some(state) = guard.as_ref() {
+                match tts_stream_inner(state, req).await {
+                    Ok(resp) => resp.into_response(),
+                    Err(e) => e.into_response(),
+                }
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"error": "loading"}))).into_response()
+            }
+        }))
+        .with_state(shared)
+        .layer(cors);
+
+    // Bind and serve IMMEDIATELY
     let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8080);
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
     eprintln!("[TTS] Binding to {addr}...");
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    eprintln!("[TTS] Bound to {addr}, now loading model...");
+    eprintln!("[TTS] Server listening on {addr} (model loading in background)");
     
-    let model_path = std::env::var("KOKORO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string());
-    let voices_path = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
-    eprintln!("[TTS] Model path: {model_path}");
-    eprintln!("[TTS] Voices path: {voices_path}");
-
-    // Load model on blocking thread so we don't block the tokio runtime
-    eprintln!("[TTS] Loading model (this takes ~30s)...");
-    let session = tokio::task::spawn_blocking(move || {
-        load_model(&model_path)
-    }).await.map_err(|e| ApiError::Internal(format!("spawn_blocking: {e}")))??;
-    eprintln!("[TTS] Model loaded");
-    
-    eprintln!("[TTS] Loading voices...");
-    let voices_path_clone = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
-    let voices = tokio::task::spawn_blocking(move || {
-        load_voices(&voices_path_clone)
-    }).await.map_err(|e| ApiError::Internal(format!("spawn_blocking: {e}")))??;
-    let voices = Arc::new(voices);
-    eprintln!("[TTS] Voices loaded");
-    
-    let semaphore = Arc::new(Semaphore::new(
-        std::env::var("TTS_MAX_CONCURRENCY")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|v| *v > 0)
-            .unwrap_or(MAX_CONCURRENCY),
-    ));
-
-    let state = AppState {
-        session: Arc::new(tokio::sync::Mutex::new(session)),
-        voices,
-        semaphore,
-    };
-
-    // Spawn warmup in background
-    let warmup_state = state.clone();
-    tokio::spawn(async move {
-        eprintln!("[TTS] Starting warmup...");
-        warmup(&warmup_state).await;
-        eprintln!("[TTS] Warmup complete");
-    });
-
-    let cors = cors_layer();
-
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/voices", get(list_voices))
-        .route("/tts", post(tts))
-        .route("/tts/stream", post(tts_stream))
-        .with_state(state)
-        .layer(cors);
-
-    eprintln!("[TTS] Server ready, accepting connections");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
@@ -347,6 +412,83 @@ async fn tts_stream(
                 }
             };
             let res = synthesize(&state_clone, &chunk, &voice, speed).await;
+            drop(guard);
+            match res {
+                Ok(wav) => {
+                    let text_bytes = chunk.as_bytes();
+                    let header = build_chunk_header(wav.len(), text_bytes.len());
+                    if tx.send(Ok(Bytes::from([header, text_bytes.to_vec(), wav].concat()))).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    return;
+                }
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx).map(|res| match res {
+        Ok(bytes) => Ok::<Bytes, ApiError>(bytes),
+        Err(e) => Err(e),
+    });
+
+    let body = axum::body::Body::from_stream(stream);
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "application/octet-stream".parse().unwrap());
+    headers.insert("Cache-Control", "no-cache".parse().unwrap());
+    headers.insert(
+        "X-Chunk-Count",
+        HeaderValue::from_str(&chunk_count.to_string()).unwrap(),
+    );
+    Ok((headers, body))
+}
+
+// Inner versions for dynamic router with shared state
+async fn tts_inner(state: &AppState, req: TtsRequest) -> Result<Response, ApiError> {
+    let start = std::time::Instant::now();
+    let voice = req.voice.unwrap_or_else(|| "af_heart".to_string());
+    let speed = req.speed.unwrap_or(1.0);
+    validate_request(&req.text, &voice, speed, state)?;
+
+    let _guard = state.semaphore.acquire().await.map_err(|e| ApiError::Internal(e.to_string()))?;
+    let wait_time = start.elapsed();
+    
+    let synth_start = std::time::Instant::now();
+    let bytes = synthesize(state, &req.text, &voice, speed).await?;
+    let synth_time = synth_start.elapsed();
+
+    println!("[TTS] {} chars | wait={}ms synth={}ms total={}ms", 
+        req.text.len(), wait_time.as_millis(), synth_time.as_millis(), start.elapsed().as_millis());
+
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "audio/wav".parse().unwrap());
+    headers.insert("Cache-Control", "no-cache".parse().unwrap());
+    Ok((headers, bytes).into_response())
+}
+
+async fn tts_stream_inner(state: &AppState, req: TtsRequest) -> Result<impl IntoResponse, ApiError> {
+    let voice = req.voice.clone().unwrap_or_else(|| "af_heart".to_string());
+    let speed = req.speed.unwrap_or(1.0);
+    validate_request(&req.text, &voice, speed, state)?;
+
+    let chunks = split_text_smart(&req.text, 80);
+    let chunk_count = chunks.len();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, ApiError>>(4);
+
+    let state_clone = state.clone();
+    let voice_clone = voice.clone();
+    tokio::spawn(async move {
+        for chunk in chunks {
+            let guard = match state_clone.semaphore.acquire().await {
+                Ok(g) => g,
+                Err(e) => {
+                    let _ = tx.send(Err(ApiError::Internal(e.to_string()))).await;
+                    return;
+                }
+            };
+            let res = synthesize(&state_clone, &chunk, &voice_clone, speed).await;
             drop(guard);
             match res {
                 Ok(wav) => {
