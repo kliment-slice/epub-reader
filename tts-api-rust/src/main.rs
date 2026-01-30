@@ -108,17 +108,34 @@ async fn main() {
 async fn run() -> Result<(), ApiError> {
     eprintln!("[TTS] Starting up...");
     init_tracing();
+    
+    // Bind port IMMEDIATELY so Fly health checks can connect
+    let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8080);
+    let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+    eprintln!("[TTS] Binding to {addr}...");
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    eprintln!("[TTS] Bound to {addr}, now loading model...");
+    
     let model_path = std::env::var("KOKORO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string());
     let voices_path = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
     eprintln!("[TTS] Model path: {model_path}");
     eprintln!("[TTS] Voices path: {voices_path}");
 
-    eprintln!("[TTS] Loading model...");
-    let session = load_model(&model_path)?;
+    // Load model on blocking thread so we don't block the tokio runtime
+    eprintln!("[TTS] Loading model (this takes ~30s)...");
+    let session = tokio::task::spawn_blocking(move || {
+        load_model(&model_path)
+    }).await.map_err(|e| ApiError::Internal(format!("spawn_blocking: {e}")))??;
     eprintln!("[TTS] Model loaded");
     
     eprintln!("[TTS] Loading voices...");
-    let voices = Arc::new(load_voices(&voices_path)?);
+    let voices_path_clone = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
+    let voices = tokio::task::spawn_blocking(move || {
+        load_voices(&voices_path_clone)
+    }).await.map_err(|e| ApiError::Internal(format!("spawn_blocking: {e}")))??;
+    let voices = Arc::new(voices);
+    eprintln!("[TTS] Voices loaded");
+    
     let semaphore = Arc::new(Semaphore::new(
         std::env::var("TTS_MAX_CONCURRENCY")
             .ok()
@@ -126,7 +143,6 @@ async fn run() -> Result<(), ApiError> {
             .filter(|v| *v > 0)
             .unwrap_or(MAX_CONCURRENCY),
     ));
-    eprintln!("[TTS] Voices loaded");
 
     let state = AppState {
         session: Arc::new(tokio::sync::Mutex::new(session)),
@@ -134,7 +150,7 @@ async fn run() -> Result<(), ApiError> {
         semaphore,
     };
 
-    // Spawn warmup in background so server starts immediately
+    // Spawn warmup in background
     let warmup_state = state.clone();
     tokio::spawn(async move {
         eprintln!("[TTS] Starting warmup...");
@@ -152,10 +168,8 @@ async fn run() -> Result<(), ApiError> {
         .with_state(state)
         .layer(cors);
 
-    let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8080);
-    let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
-    eprintln!("[TTS] Binding to {addr}...");
-    axum::serve(tokio::net::TcpListener::bind(addr).await.unwrap(), app)
+    eprintln!("[TTS] Server ready, accepting connections");
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .unwrap();
