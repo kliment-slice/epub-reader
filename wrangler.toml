@@ -10,4 +10,4 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "epub_reader"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "90bcfb81-644e-464a-ab15-2a33bdf90fe7"
