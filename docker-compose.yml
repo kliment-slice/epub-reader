@@ -25,8 +25,20 @@ services:
   tts-api:
     build:
       context: ./tts-api-rust
+      dockerfile: Dockerfile
+    working_dir: /app
     ports:
       - "8080:8080"
+    volumes:
+      # Mount source for hot-reload with cargo-watch (dev mode)
+      - ./tts-api-rust/src:/app/src:ro
+      - ./tts-api-rust/config.json:/app/config.json:ro
+      - ./tts-api-rust/Cargo.toml:/app/Cargo.toml:ro
+      # Mount models so they don't need to be copied each build
+      - ./tts-api-rust/models:/app/models:ro
+    environment:
+      RUST_LOG: info
+      RUST_BACKTRACE: 1
     restart: unless-stopped
 
 volumes:

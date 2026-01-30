@@ -1,7 +1,0 @@
-# Kokoro TTS API
-kokoro-onnx>=0.4.2
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-python-multipart>=0.0.9
-soundfile>=0.12.1
-numpy>=1.26.0

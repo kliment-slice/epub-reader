@@ -1,6 +1,6 @@
 use axum::{
     extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
@@ -20,7 +20,7 @@ use std::sync::Arc;
 use tokio::process::Command;
 use tokio::sync::Semaphore;
 use tokio_stream::StreamExt;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tracing::info;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -97,7 +97,15 @@ impl IntoResponse for ApiError {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), ApiError> {
+async fn main() {
+    if let Err(err) = run().await {
+        // Ensure errors are visible even if tracing is misconfigured.
+        eprintln!("fatal: {err}");
+        std::process::exit(1);
+    }
+}
+
+async fn run() -> Result<(), ApiError> {
     init_tracing();
     let model_path = std::env::var("KOKORO_MODEL").unwrap_or_else(|_| DEFAULT_MODEL_PATH.to_string());
     let voices_path = std::env::var("KOKORO_VOICES").unwrap_or_else(|_| DEFAULT_VOICES_PATH.to_string());
@@ -120,18 +128,15 @@ async fn main() -> Result<(), ApiError> {
 
     warmup(&state).await;
 
+    let cors = cors_layer();
+
     let app = Router::new()
         .route("/health", get(health))
         .route("/voices", get(list_voices))
         .route("/tts", post(tts))
         .route("/tts/stream", post(tts_stream))
         .with_state(state)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        );
+        .layer(cors);
 
     let port: u16 = std::env::var("PORT").ok().and_then(|v| v.parse().ok()).unwrap_or(8080);
     let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
@@ -145,6 +150,31 @@ async fn main() -> Result<(), ApiError> {
 
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
+}
+
+fn cors_layer() -> CorsLayer {
+    let origins: Vec<HeaderValue> = std::env::var("CORS_ALLOWED_ORIGINS")
+        .unwrap_or_else(|_| "https://epub2voice.org,https://www.epub2voice.org,http://localhost:3000,http://127.0.0.1:3000".to_string())
+        .split(',')
+        .filter_map(|origin| {
+            let origin = origin.trim();
+            if origin.is_empty() {
+                None
+            } else {
+                HeaderValue::from_str(origin).ok()
+            }
+        })
+        .collect();
+
+    let base = CorsLayer::new()
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any);
+
+    if origins.is_empty() {
+        base.allow_origin(Any)
+    } else {
+        base.allow_origin(AllowOrigin::list(origins))
+    }
 }
 
 fn init_tracing() {

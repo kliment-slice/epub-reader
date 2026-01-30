@@ -1,7 +1,8 @@
-## EPUB Reader (Next.js)
-[![Cloudflare Pages](https://img.shields.io/endpoint?url=https://YOUR_CLOUDFLARE_WEBHOOK_BADGE_URL)](https://epub-reader-we8.pages.dev)
+# EPUB Reader with Local TTS
 
-Kokoro-powered EPUB reader with streaming TTS: upload an EPUB, browse chapters, pick a voice, and listen with word-by-word highlighting.
+## 🚀 Live Demo
+- **Frontend**: [epub2voice.org](https://epub2voice.org)
+- **TTS API**: [https://epub-reader.fly.dev](https://epub-reader.fly.dev)
 
 ## Architecture
 
@@ -11,17 +12,16 @@ Kokoro-powered EPUB reader with streaming TTS: upload an EPUB, browse chapters, 
 │     Next.js + EPUB.js                   │
 │                                         │
 │  On load: warmup ping to TTS API        │
-│  On play: stream audio from TTS API     │
+│  On play: fetch audio from TTS API      │
 └─────────────────────────────────────────┘
                     │
                     ▼
 ┌─────────────────────────────────────────┐
 │      TTS API (Fly.io Container)         │
-│      Python FastAPI + Kokoro ONNX       │
+│      Rust Axum + Kokoro ONNX            │
 │                                         │
 │  GET  /health  - Warmup & status        │
-│  POST /tts     - Single audio           │
-│  POST /tts/stream - Streaming chunks    │
+│  POST /tts     - Generate audio         │
 └─────────────────────────────────────────┘
 ```
 

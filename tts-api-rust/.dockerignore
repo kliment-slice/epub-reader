@@ -1,0 +1,22 @@
+# Build artifacts - never send to Docker context
+target/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Rust cache (if present)
+.cargo/
+
+# README and docs
+README.md
+*.md
+
+# Fly.io config (not needed in Docker context)
+fly.toml
