@@ -22,15 +22,15 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Layer 3: Cargo.toml first for dependency caching
 # This layer is cached as long as Cargo.toml doesn't change
-COPY Cargo.toml Cargo.lock* ./
+COPY tts-api-rust/Cargo.toml tts-api-rust/Cargo.lock* ./
 
 # Layer 4: Pre-fetch dependencies with dummy main.rs
 # This layer caches all cargo dependencies
 RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo fetch && cargo build --release || true && rm -rf src
 
 # Layer 5: Copy actual source code
-COPY src ./src
-COPY config.json ./config.json
+COPY tts-api-rust/src ./src
+COPY tts-api-rust/config.json ./config.json
 
 # Layer 6: Build release binary (only rebuilds if src/ or config.json change)
 RUN cargo build --release

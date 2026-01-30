@@ -1,14 +1,17 @@
-# fly.toml app configuration file generated for epub-reader-tts on 2026-01-30T16:01:42Z
-#
-# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
-#
+# fly.toml app configuration file for epub-reader-tts
+# Located at repo root for Fly GitHub integration compatibility
 
 app = 'epub-reader-tts'
 primary_region = 'ams'
 
 [build]
   dockerfile = 'tts-api-rust/Dockerfile'
-  build-target = 'runner'
+
+[env]
+  PORT = '8080'
+  KOKORO_MODEL = '/app/kokoro-v1.0.onnx'
+  KOKORO_VOICES = '/app/voices-v1.0.bin'
+  TTS_MAX_CONCURRENCY = '1'
 
 [http_service]
   internal_port = 8080
