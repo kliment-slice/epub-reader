@@ -1,10 +1,10 @@
-# fly.toml app configuration file generated for epub-reader-tts on 2026-01-30T15:25:16Z
+# fly.toml app configuration file generated for epub-reader-tts on 2026-01-30T15:53:38Z
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
 
 app = 'epub-reader-tts'
-primary_region = 'iad'
+primary_region = 'ams'
 
 [build]
 
